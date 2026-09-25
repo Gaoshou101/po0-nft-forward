@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Mock nft(8): generic multi-table simulation for offline script testing."""
+import os, sys, json
+
+STATE = os.environ.get("MOCK_NFT_STATE", "/tmp/mock_nft_state.json")
+LOG = os.environ.get("MOCK_NFT_LOG")
+
+
+def logf(argv):
+    if LOG:
+        with open(LOG, "a") as f:
+            f.write(" ".join(argv) + "\n")
+
+
+def load():
+    if os.path.exists(STATE):
+        with open(STATE) as f:
+            return json.load(f)
+    return {"tables": {}, "next_handle": 4}
+
+
+def save(s):
+    with open(STATE, "w") as f:
+        json.dump(s, f, indent=1)
+
+
+def ensure_table(s, tname):
+    s["tables"].setdefault(tname, {"chains": {}})
+
+
+def ensure_chain(s, tname, cname, decl=""):
+    ensure_table(s, tname)
+    ch = s["tables"][tname]["chains"].setdefault(cname, {"decl": "", "rules": []})
+    if decl:
+        ch["decl"] = decl
+
+
+def add_rule_text(s, tname, cname, text):
+    ensure_chain(s, tname, cname)
+    s["tables"][tname]["chains"][cname]["rules"].append(
+        {"text": text, "handle": s["next_handle"]})
+    s["next_handle"] += 1
+
+
+def render_chain(tname, cname, chain, handles):
+    out = ["\tchain %s {" % cname]
+    decl = chain.get("decl") or (
+        "type nat hook prerouting priority dstnat; policy accept;"
+        if cname == "prerouting" else
+        "type nat hook postrouting priority srcnat; policy accept;")
+    out.append("\t\t%s" % decl)
+    for r in chain["rules"]:
+        line = "\t\t" + r["text"]
+        if handles:
+            line += " # handle %d" % r["handle"]
+        out.append(line)
+    out.append("\t}")
+    return out
+
+
+def render_table(s, tname, handles, only_chain=None):
+    if tname not in s["tables"]:
+        return None
+    out = ["table %s {" % tname]
+    for cname, chain in s["tables"][tname]["chains"].items():
+        if only_chain and cname != only_chain:
+            continue
+        out += render_chain(tname, cname, chain, handles)
+    out.append("}")
+    return "\n".join(out)
+
+
+def exec_tokens(s, tk):
+    if not tk:
+        return
+    if tk[0] == "add":
+        what = tk[1]
+        if what == "table":
+            ensure_table(s, tk[2] + " " + tk[3])
+        elif what == "chain":
+            tname = tk[2] + " " + tk[3]
+            cname = tk[4]
+            rest = " ".join(tk[5:])
+            decl = ""
+            if "{" in rest and "}" in rest:
+                decl = rest[rest.index("{") + 1:rest.rindex("}")].strip()
+            ensure_chain(s, tname, cname, decl)
+        elif what == "rule":
+            add_rule_text(s, tk[2] + " " + tk[3], tk[4], " ".join(tk[5:]))
+    elif tk[0] == "delete" and tk[1] == "table":
+        s["tables"].pop(tk[2] + " " + tk[3], None)
+    elif tk[0] == "delete" and tk[1] == "rule":
+        tname = tk[2] + " " + tk[3]
+        cname, h = tk[4], int(tk[6])
+        ch = s["tables"].get(tname, {}).get("chains", {}).get(cname)
+        if ch is not None:
+            ch["rules"] = [r for r in ch["rules"] if r["handle"] != h]
+    elif tk[0] == "flush" and tk[1] == "chain":
+        tname = tk[2] + " " + tk[3]
+        ch = s["tables"].get(tname, {}).get("chains", {}).get(tk[4])
+        if ch is not None:
+            ch["rules"] = []
+
+
+def parse_file(s, path):
+    ctx_table = None
+    ctx_chain = None
+    with open(path) as f:
+        for raw in f:
+            t = raw.strip()
+            if not t or t.startswith("#"):
+                continue
+            if t.startswith("add "):
+                exec_tokens(s, t.split())
+                continue
+            if t.startswith("table "):
+                parts = t.split()
+                ctx_table = parts[1] + " " + parts[2]
+                ensure_table(s, ctx_table)
+                ctx_chain = None
+                continue
+            if t.startswith("chain "):
+                ctx_chain = t.split()[1]
+                ensure_chain(s, ctx_table, ctx_chain)
+                continue
+            if t.startswith("type "):
+                s["tables"][ctx_table]["chains"][ctx_chain]["decl"] = t.rstrip(";")
+                continue
+            if t == "}":
+                if ctx_chain:
+                    ctx_chain = None
+                else:
+                    ctx_table = None
+                continue
+            if ctx_chain:
+                add_rule_text(s, ctx_table, ctx_chain, t)
+
+
+def main():
+    argv = sys.argv[1:]
+    logf(argv)
+    handles = False
+    if argv and argv[0] == "-a":
+        handles = True
+        argv = argv[1:]
+    if not argv:
+        sys.exit(2)
+    s = load()
+    c = argv[0]
+
+    if c == "list":
+        what = argv[1]
+        if what == "table":
+            out = render_table(s, argv[2] + " " + argv[3], handles)
+            if out is None:
+                print("Error: No such file or directory", file=sys.stderr)
+                sys.exit(1)
+            print(out)
+            return
+        if what == "chain":
+            tname = argv[2] + " " + argv[3]
+            if tname not in s["tables"] or argv[4] not in s["tables"][tname]["chains"]:
+                print("Error: No such file or directory", file=sys.stderr)
+                sys.exit(1)
+            print(render_table(s, tname, handles, only_chain=argv[4]))
+            return
+        if what == "ruleset":
+            for tname in list(s["tables"]):
+                print(render_table(s, tname, handles))
+            return
+        sys.exit(2)
+
+    if c == "-c":
+        try:
+            parse_file(json.loads(json.dumps(s)), argv[2])
+        except Exception as exc:
+            print("Error: %s" % exc, file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if c == "-f":
+        parse_file(s, argv[1])
+        save(s)
+        return
+
+    if c in ("add", "delete", "flush"):
+        exec_tokens(s, argv)
+        save(s)
+        return
+
+    sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

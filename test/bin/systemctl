@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+case "${1:-}" in
+  is-enabled) echo enabled ;;
+esac
+exit 0
