@@ -14,6 +14,10 @@ set -Eeuo pipefail
 #   4) sysctl 按 key 合并写入，不再整体覆盖文件（避免冲掉你手写的内核参数）
 #   5) 单条规则失败不再中断整个脚本，可继续添加下一条
 #
+# Po0 链路两个关键参数（最容易搞反，详见 README）：
+#   * 目标 IP  = 出口机 / 落地机的【公网 IP】（CCN 内部送达，不要填内网 IP）
+#   * SNAT 源  = 本机（Po0 入口机）的【内网 IP】（回包才会走 CCN 内网）
+#
 # 所有配置项均可用同名环境变量覆盖。
 # ============================================================================
 
@@ -438,7 +442,7 @@ add_rules_step_by_step() {
     inport="$(prompt_port "入口端口（Po0 对外监听端口）")"
     warn_banned_port "$inport" "入口端口" || { printf '已跳过该端口。\n'; continue; }
 
-    dip="$(prompt_ipv4 "目标 IP（出口机的 CCN 内网 IP）")"
+    dip="$(prompt_ipv4 "目标 IP（出口机 / 落地机的公网 IP）")"
     dport="$(prompt_port "目标端口（出口机协议监听端口）" "$inport")"
     warn_banned_port "$dport" "目标端口" || { printf '已跳过该端口。\n'; continue; }
 
@@ -596,7 +600,7 @@ usage() {
   MSS_SIZE($MSS_SIZE)  CONNTRACK_MAX($CONNTRACK_MAX)
 
 Po0 使用要点：
-  * 目标 IP 填出口机的【CCN 内网 IP】；SNAT 源地址填本机的【内网 IP】。
+  * 目标 IP 填出口机 / 落地机的【公网 IP】；SNAT 源地址填本机的【内网 IP】。
   * 封禁端口 ${BANNED_PORTS[*]} 不可用；禁止用于回国访问。
 EOF
 }
